@@ -1,0 +1,22 @@
+# Render Blueprint (Infrastructure as Code) — https://render.com/docs/blueprint-spec
+# نشر بنقرة واحدة: Render Dashboard → New → Blueprint → اختر المستودع.
+services:
+  - type: web
+    name: encrypted-message
+    runtime: node
+    plan: free
+    region: frankfurt        # الأقرب للاعبين في الخليج/الشرق الأوسط وأوروبا
+    branch: main
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /healthz
+    autoDeploy: true
+    numInstances: 1          # الحالة في الذاكرة (Engine.rooms) ⇒ نسخة واحدة فقط
+    envVars:
+      # إصدار Node: نفس القيمة في ملف .node-version. متغيّر البيئة هذا يتقدّم على الملف.
+      # - key: NODE_VERSION
+      #   value: "22.22.0"
+      # لا حاجة لضبط ALLOWED_ORIGINS ما دامت الواجهة تُخدَم من نفس النطاق
+      # (فحص Origin يمرّ عندما يتطابق host الطلب مع host الأصل — server/ws.js:114).
+      # - key: ALLOWED_ORIGINS
+      #   value: "https://your-frontend.example.com"

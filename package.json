@@ -1,0 +1,9 @@
+{
+  "name": "encrypted-message-game",
+  "version": "1.0.0",
+  "private": true,
+  "description": "رسالة مشفّرة — لعبة ألغاز جماعية لحظية",
+  "main": "server/index.js",
+  "scripts": { "start": "node server/index.js", "test": "node --test test/*.test.js" },
+  "engines": { "node": ">=22" }
+}
