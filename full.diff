@@ -1,0 +1,856 @@
+diff --git a/public/app.js b/public/app.js
+index 2534155..7db57b5 100644
+--- a/public/app.js
++++ b/public/app.js
+@@ -49,6 +49,34 @@ const teamById = (id) => S.teams.find((t) => t.id === id);
+ const isHost = () => S.you.role === 'host';
+ const fmtSec = (ms) => (ms / 1000).toFixed(2);
+ 
++// ───────────── بطاقة التهنئة (5 ثوانٍ عند انتهاء جميع الفرق) ─────────────
++let C = null;
++let prevAllDone = false;
++let celebrateTimer = null;
++function buildCelebration() { const el = h('div', { class: 'celebrate hidden' }); C = { el }; return el; }
++function startCelebration() {
++  if (!S.ranking || !S.ranking.length) return;
++  const top = S.ranking[0];
++  const team = teamById(top.teamId);
++  const names = team ? team.members.map((m) => m.name).join('، ') : '';
++  const layer = h('div', { class: 'layer' });
++  for (let i = 0; i < 16; i++) {
++    layer.append(h('span', { class: 'star', style: `left:${Math.random() * 100}%;top:${Math.random() * 85}%;animation-delay:${(Math.random() * 1.5).toFixed(2)}s`, text: ['✨', '⭐', '🌟'][i % 3] }));
++  }
++  const colors = ['#22e6ff', '#9b5cff', '#38f2a0', '#ffc857', '#ff3d6e'];
++  for (let i = 0; i < 40; i++) {
++    layer.append(h('span', { class: 'confetti-piece', style: `left:${Math.random() * 100}%;background:${colors[i % colors.length]};animation-duration:${(2 + Math.random() * 1.6).toFixed(2)}s;animation-delay:${(Math.random() * .6).toFixed(2)}s` }));
++  }
++  C.el.replaceChildren(layer,
++    h('div', { class: 'trophy', text: '🏆' }),
++    h('h1', {}, 'ألف مبروووك الحاصلين على المركز الأول وهم', h('span', { class: 'winner', text: team ? team.name : '' })),
++    names ? h('div', { class: 'members', text: names }) : null,
++    h('div', { class: 'by', text: 'By PUBLIC' }));
++  C.el.classList.remove('hidden');
++  clearTimeout(celebrateTimer);
++  celebrateTimer = setTimeout(() => { C.el.classList.add('hidden'); }, 5000);
++}
++
+ // ───────────── الاتصال ─────────────
+ function send(msg) {
+   if (ws && ws.readyState === 1) { ws.send(JSON.stringify(msg)); return true; }
+@@ -72,6 +100,9 @@ function connect() {
+       try { localStorage.setItem(SESSION_KEY, JSON.stringify(session)); } catch { /* وضع خاص */ }
+     } else if (m.t === 'state') {
+       S = m.s; offset = S.serverNow - Date.now(); pending = false; update();
++    } else if (m.t === 'kicked') {
++      toast('تم طردك من الغرفة');
++      clearSession();
+     } else if (m.t === 'err') {
+       if (m.code === 'no_room' || m.code === 'bad_session') { if (session && !S) clearSession(); }
+       toast(m.msg);
+@@ -87,6 +118,9 @@ function connect() {
+ }
+ function clearSession() {
+   session = null; S = null;
++  prevAllDone = false;
++  clearTimeout(celebrateTimer);
++  if (C) C.el.classList.add('hidden');
+   try { localStorage.removeItem(SESSION_KEY); } catch { /* */ }
+   update();
+ }
+@@ -220,7 +254,7 @@ function buildPlay() {
+     pending = true;
+     send({ t: 'revealCard', card: i });
+   });
+-  initSort();
++  // initSort() لم تعد تُستدعى: ترتيب صندوق الشفرة ثابت الآن (بند 5) ولا يمكن سحبه/إعادة ترتيبه
+ }
+ 
+ function amLeader() { const rd = S.round; if (!rd) return false; const t = teamById(rd.teamId); return !!t && t.leaderId === S.you.id && S.you.teamId === rd.teamId; }
+@@ -317,7 +351,7 @@ function renderChips(order, n, control) {
+   if (dragging) return;
+   const cur = [...R.chips.children].map((c) => +c.dataset.i);
+   if (cur.join() !== order.join()) R.chips.replaceChildren(...order.map((i) => h('div', { class: 'chip', 'data-i': i, text: S.symbols[i] })));
+-  R.chips.classList.toggle('can', control);
++  R.chips.classList.toggle('can', false); // ترتيب صندوق الشفرة ثابت الآن (بند 5) — لا سحب متاح إطلاقًا
+   R.chips.classList.toggle('sm', n > 12);
+ }
+ 
+@@ -420,7 +454,8 @@ function updateTeams() {
+     for (const m of t.members) {
+       members.append(h('div', { class: 'member' }, h('span', { class: 'dot' + (m.online ? ' on' : '') }),
+         h('span', { class: 'grow', text: (m.id === t.leaderId ? '👑 ' : '') + m.name + (m.id === S.you.id ? ' (أنت)' : '') }),
+-        host && m.id !== t.leaderId ? h('button', { class: 'btn small', text: 'اجعله قائدًا', onclick: () => send({ t: 'setLeader', teamId: t.id, playerId: m.id }) }) : null));
++        host && m.id !== t.leaderId ? h('button', { class: 'btn small', text: 'اجعله قائدًا', onclick: () => send({ t: 'setLeader', teamId: t.id, playerId: m.id }) }) : null,
++        host && m.id !== S.you.id ? h('button', { class: 'btn small icon danger', text: '⛔', 'aria-label': `طرد ${m.name}`, onclick: () => { if (confirm(`طرد ${m.name} من الغرفة؟`)) send({ t: 'kickPlayer', playerId: m.id }); } }) : null));
+     }
+     card.append(members);
+ 
+@@ -446,20 +481,41 @@ function updateTeams() {
+ 
+   if (S.spectators.length) {
+     el.append(h('div', { class: 'sectitle', text: `مشاهدون (${S.spectators.length})` }),
+-      h('div', { class: 'glass panel' }, S.spectators.map((m) => h('div', { class: 'member' }, h('span', { class: 'dot' + (m.online ? ' on' : '') }), m.name + (m.id === S.you.id ? ' (أنت)' : '')))));
++      h('div', { class: 'glass panel' }, S.spectators.map((m) => h('div', { class: 'member' }, h('span', { class: 'dot' + (m.online ? ' on' : '') }),
++        h('span', { class: 'grow', text: m.name + (m.id === S.you.id ? ' (أنت)' : '') }),
++        host && m.id !== S.you.id ? h('button', { class: 'btn small icon danger', text: '⛔', 'aria-label': `طرد ${m.name}`, onclick: () => { if (confirm(`طرد ${m.name} من الغرفة؟`)) send({ t: 'kickPlayer', playerId: m.id }); } }) : null))));
+   }
+ 
+-  const done = S.teams.filter((t) => t.result);
+-  if (done.length) {
+-    const rows = done.map((t) => {
+-      const r = t.result, ok = r.verdict === 'CORRECT';
+-      return h('tr', {}, h('td', { text: t.name }), h('td', { text: ok ? '✅' : '❌' }), h('td', { text: ok ? fmtSec(r.solveMs) : '—' }), h('td', { text: r.reveals }), h('td', { text: r.exhausted }), h('td', { text: r.ops }));
++  if (S.room.allDone && S.ranking && S.ranking.length) {
++    const rows = S.ranking.map((r, i) => {
++      const t = teamById(r.teamId);
++      const full = (t && t.result) || {};
++      const ok = r.verdict === 'CORRECT';
++      const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : String(i + 1);
++      return h('tr', {}, h('td', { text: medal }), h('td', { text: r.name }), h('td', { text: ok ? '✅' : '❌' }),
++        h('td', { text: ok ? fmtSec(r.solveMs) : '—' }), h('td', { text: full.reveals ?? '—' }), h('td', { text: full.exhausted ?? '—' }));
+     });
+-    const solved = done.filter((t) => t.result.verdict === 'CORRECT').length;
+-    el.append(h('div', { class: 'sectitle', text: `النتائج — حُلّت ${solved} من ${done.length}` }),
++    const solved = S.ranking.filter((r) => r.verdict === 'CORRECT').length;
++    el.append(h('div', { class: 'sectitle', text: `الترتيب النهائي — حُلّت ${solved} من ${S.ranking.length}` }),
+       h('div', { class: 'glass panel wrap-x' }, h('table', { class: 'res' },
+-        h('thead', {}, h('tr', {}, ['الفريق', 'الحل', 'الزمن (ث)', 'كشف', 'استنفاد', 'عمليات'].map((x) => h('th', { text: x })))), h('tbody', {}, rows)),
+-      h('div', { class: 'muted', style: 'font-size:12px', text: 'الأساس هو صحة الإجابة. الأعمدة الأخرى بيانات لكسر التعادل فقط، وقاعدة الحسم لم تُحدَّد بعد.' })));
++        h('thead', {}, h('tr', {}, ['#', 'الفريق', 'الحل', 'الزمن (ث)', 'كشف', 'استنفاد'].map((x) => h('th', { text: x })))), h('tbody', {}, rows)),
++      h('div', { class: 'muted', style: 'font-size:12px', text: 'الترتيب: نقطة لكل فريق يحل جملته بشكل صحيح، ثم وقت الحل لكسر التعادل.' })));
++    if (host) {
++      el.append(h('div', { class: 'row' },
++        h('button', { class: 'btn primary grow', text: '🔁 إعادة اللعب', onclick: () => send({ t: 'replay' }) }),
++        h('button', { class: 'btn grow', text: '🚪 العودة إلى الردهة', onclick: () => { if (confirm('العودة إلى ردهة الانتظار؟ ستُصفَّر بيانات الجولة الحالية لكل الفرق.')) send({ t: 'returnToLobby' }); } })));
++    }
++  } else if (host) {
++    const done = S.teams.filter((t) => t.result);
++    if (done.length) {
++      const rows = done.map((t) => {
++        const r = t.result, ok = r.verdict === 'CORRECT';
++        return h('tr', {}, h('td', { text: t.name }), h('td', { text: ok ? '✅' : '❌' }), h('td', { text: ok ? fmtSec(r.solveMs) : '—' }), h('td', { text: r.reveals }));
++      });
++      el.append(h('div', { class: 'sectitle', text: `نتائج الفرق حتى الآن (أنت فقط تراها) — ${done.length}/${S.teams.length}` }),
++        h('div', { class: 'glass panel wrap-x' }, h('table', { class: 'res' },
++          h('thead', {}, h('tr', {}, ['الفريق', 'الحل', 'الزمن (ث)', 'كشف'].map((x) => h('th', { text: x })))), h('tbody', {}, rows))));
++    }
+   }
+   R.vTeams.replaceChildren(el);
+ }
+@@ -475,6 +531,7 @@ function updateGame() {
+ 
+ function update() {
+   if (!$app.firstChild) { $app.append(buildHome()); }
++  if (!C) { $app.append(buildCelebration()); }
+   if (!R && S) { const room = buildRoom(); R = Object.assign(R, { el: room }); $app.append(room); }
+   if (!S) {
+     if (R) { R.el.classList.add('hidden'); }
+@@ -489,6 +546,9 @@ function update() {
+   const role = isHost() ? 'مستضيف' : S.you.teamId ? (amLeaderOfMyTeam() ? 'قائد' : 'عضو') : 'مشاهد';
+   R.me.textContent = `${S.you.name} · ${role}`;
+ 
++  if (S.room.allDone && !prevAllDone) startCelebration();
++  prevAllDone = S.room.allDone;
++
+   const key = S.round ? `${S.round.teamId}:${S.round.status}` : 'none';
+   if (key !== lastKey) {
+     if (lastKey === '' && S.round && S.round.status !== 'WAITING') tab = 'game';
+diff --git a/public/style.css b/public/style.css
+new file mode 100644
+index 0000000..acbb714
+--- /dev/null
++++ b/public/style.css
+@@ -0,0 +1,170 @@
++:root {
++  --bg: #04060d; --bg2: #0a1224; --glass: rgba(14, 24, 44, .78); --line: rgba(34, 230, 255, .22);
++  --cyan: #22e6ff; --cyan-dim: #1596a8; --violet: #9b5cff; --red: #ff3d6e; --green: #38f2a0; --amber: #ffc857;
++  --text: #e6f4ff; --muted: #7f95b3;
++  --font: -apple-system, "SF Arabic", "Geeza Pro", "Segoe UI", "Noto Naskh Arabic", Tahoma, system-ui, sans-serif;
++}
++* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
++html, body { height: 100%; margin: 0; background: var(--bg); color: var(--text); font-family: var(--font); overscroll-behavior: none; }
++body { position: fixed; inset: 0; overflow: hidden; -webkit-text-size-adjust: 100%; -webkit-touch-callout: none; }
++#app {
++  height: 100vh; height: 100dvh; display: flex; flex-direction: column; overflow: hidden;
++  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
++  background:
++    radial-gradient(120% 60% at 50% -10%, rgba(34, 230, 255, .10), transparent 60%),
++    linear-gradient(rgba(34, 230, 255, .035) 1px, transparent 1px) 0 0 / 100% 28px,
++    var(--bg);
++}
++button, input, textarea, select { font: inherit; color: inherit; }
++button { cursor: pointer; border: 0; }
++input, textarea { font-size: 16px; /* يمنع تكبير iOS التلقائي */ }
++.hidden { display: none !important; }
++.scroll { overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; }
++:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
++
++/* ───── عناصر عامة ───── */
++.glass { background: var(--glass); border: 1px solid var(--line); border-radius: 14px; box-shadow: 0 0 0 1px rgba(0,0,0,.4) inset, 0 6px 24px rgba(0,0,0,.35); }
++.btn { min-height: 48px; padding: 0 18px; border-radius: 12px; background: linear-gradient(180deg, #0f2b3d, #0a1c2c); border: 1px solid var(--cyan-dim); color: var(--cyan); font-weight: 700; font-size: 16px; transition: transform .08s, background .15s; }
++.btn:active { transform: scale(.97); }
++.btn.primary { background: linear-gradient(180deg, #1ad6ee, #0fa8c0); color: #021018; border-color: var(--cyan); box-shadow: 0 0 18px rgba(34, 230, 255, .35); }
++.btn.danger { border-color: var(--red); color: var(--red); background: #1d0c16; }
++.btn.small { min-height: 40px; padding: 0 12px; font-size: 14px; border-radius: 10px; }
++.btn.icon { min-width: 40px; padding: 0; }
++.btn:disabled { opacity: .4; pointer-events: none; }
++.field { width: 100%; min-height: 48px; padding: 0 14px; border-radius: 12px; background: #060d1b; border: 1px solid var(--line); color: var(--text); }
++textarea.field { padding: 12px 14px; min-height: 76px; resize: none; line-height: 1.5; }
++.field::placeholder { color: #4d6482; }
++.muted { color: var(--muted); }
++.pill { display: inline-block; padding: 2px 10px; border-radius: 99px; font-size: 12px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
++.pill.live { color: var(--cyan); border-color: var(--cyan); }
++.pill.ok { color: var(--green); border-color: var(--green); }
++.pill.bad { color: var(--red); border-color: var(--red); }
++.pill.warn { color: var(--amber); border-color: var(--amber); }
++.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #3a4a63; margin-inline-end: 6px; }
++.dot.on { background: var(--green); box-shadow: 0 0 6px var(--green); }
++.row { display: flex; align-items: center; gap: 8px; }
++.grow { flex: 1; min-width: 0; }
++.col { display: flex; flex-direction: column; gap: 10px; }
++
++/* ───── الصفحة الرئيسية ───── */
++.home { flex: 1; padding: 22px 18px 24px; gap: 18px; max-width: 480px; width: 100%; margin: 0 auto; justify-content: center; }
++.brand { text-align: center; }
++.brand .lock { font-size: 54px; filter: drop-shadow(0 0 14px rgba(34, 230, 255, .6)); }
++.brand h1 { margin: 6px 0 2px; font-size: 34px; letter-spacing: 0; color: var(--cyan); text-shadow: 0 0 18px rgba(34, 230, 255, .5); }
++.brand p { margin: 0; color: var(--muted); font-size: 15px; }
++.panel { padding: 16px; display: flex; flex-direction: column; gap: 10px; }
++.panel h2 { margin: 0; font-size: 17px; }
++
++/* ───── إطار الغرفة ───── */
++.topbar { display: flex; align-items: center; gap: 8px; padding: 8px 12px 6px; }
++.topbar .title { font-weight: 800; color: var(--cyan); font-size: 16px; white-space: nowrap; }
++.roomcode { flex: none; margin-inline-start: auto; padding: 6px 12px; min-height: 36px; font-weight: 800; letter-spacing: 3px; font-size: 15px; background: #071426; border: 1px dashed var(--cyan-dim); color: var(--cyan); border-radius: 10px; direction: ltr; }
++.me { font-size: 12px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 0 1 auto; }
++.net { background: var(--red); color: #fff; text-align: center; font-size: 13px; padding: 4px; }
++.tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 8px 12px 10px; }
++.tab { min-height: 46px; border-radius: 12px; background: #08111f; border: 1px solid var(--line); color: var(--muted); font-weight: 700; }
++.tab.on { color: #021018; background: var(--cyan); border-color: var(--cyan); box-shadow: 0 0 14px rgba(34, 230, 255, .35); }
++.main { flex: 1; min-height: 0; display: flex; flex-direction: column; }
++.view { flex: 1; min-height: 0; display: flex; flex-direction: column; }
++
++/* ───── تبويب اللعبة ───── */
++.idle { align-items: center; justify-content: center; text-align: center; padding: 24px; gap: 14px; flex: 1; }
++.idle h2 { margin: 0; font-size: 24px; color: var(--cyan); }
++.idle .big { font-size: 56px; }
++.idle .ctrl { width: 100%; max-width: 380px; padding: 14px; }
++.play { display: flex; flex-direction: column; gap: 8px; padding: 0 10px 10px; flex: 1; min-height: 0; }
++.gbar { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 8px; }
++.gbar .tname { font-weight: 800; font-size: 18px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
++.timer { direction: ltr; font-variant-numeric: tabular-nums; font-weight: 900; font-size: 44px; line-height: 1; padding: 4px 14px; border-radius: 12px; color: var(--cyan); background: #061322; border: 1px solid var(--cyan-dim); text-shadow: 0 0 14px rgba(34, 230, 255, .6); min-width: 132px; text-align: center; }
++.timer.low { color: var(--amber); border-color: var(--amber); text-shadow: 0 0 14px rgba(255, 200, 87, .6); }
++.timer.crit { color: var(--red); border-color: var(--red); text-shadow: 0 0 14px rgba(255, 61, 110, .7); animation: beat .5s ease-in-out infinite alternate; }
++.timer.off { color: var(--muted); text-shadow: none; border-color: var(--line); }
++@keyframes beat { to { transform: scale(1.04); } }
++
++.codebox { padding: 8px 10px 10px; border-color: rgba(155, 92, 255, .45); background: linear-gradient(180deg, rgba(38, 20, 72, .55), rgba(10, 18, 36, .8)); }
++.codebox .lbl { font-size: 13px; color: #c9b4ff; margin-bottom: 6px; font-weight: 700; }
++.chips { display: flex; flex-wrap: wrap; gap: 6px; min-height: 48px; touch-action: none; user-select: none; -webkit-user-select: none; }
++.chip { width: 46px; height: 46px; display: grid; place-items: center; font-size: 26px; border-radius: 12px; background: #0a1730; border: 1px solid var(--violet); box-shadow: 0 0 10px rgba(155, 92, 255, .25); touch-action: none; user-select: none; -webkit-user-select: none; }
++.chips.sm .chip { width: 38px; height: 38px; font-size: 21px; border-radius: 10px; }
++.chips.can .chip { cursor: grab; }
++.chip.ghost { opacity: .25; }
++.chip.float { position: fixed; z-index: 50; pointer-events: none; transform: scale(1.18); background: #14264a; box-shadow: 0 8px 22px rgba(0,0,0,.6), 0 0 16px var(--violet); margin: 0; }
++
++.board { flex: 1; min-height: 0; display: grid; grid-template-columns: repeat(5, 1fr); grid-template-rows: repeat(6, 1fr); gap: 6px; }
++.card { position: relative; padding: 0; background: none; perspective: 500px; min-height: 0; min-width: 0; }
++.inner { position: absolute; inset: 0; transform-style: preserve-3d; -webkit-transform-style: preserve-3d; transition: transform .28s ease; }
++.card.flip .inner { transform: rotateY(180deg); }
++.face { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; border-radius: 12px; backface-visibility: hidden; -webkit-backface-visibility: hidden; overflow: hidden; }
++.front { background: linear-gradient(160deg, #0d1b33, #08111f); border: 1px solid var(--line); font-size: min(7.6vw, 4.4dvh, 34px); }
++.back { transform: rotateY(180deg); background: linear-gradient(160deg, #0c3a4a, #0a2233); border: 1px solid var(--cyan); box-shadow: 0 0 18px rgba(34, 230, 255, .5); padding: 2px; }
++.back .txt { font-weight: 800; text-align: center; line-height: 1.2; color: #eaffff; word-break: break-word; padding: 0 2px; }
++.back .bar { position: absolute; left: 0; right: 0; bottom: 0; height: 4px; background: var(--cyan); transform-origin: right; }
++.bar.run { animation: drain linear forwards; }
++@keyframes drain { from { transform: scaleX(1); } to { transform: scaleX(0); } }
++.pips { display: flex; gap: 4px; margin-top: 2px; height: 6px; }
++.pips u { width: 6px; height: 6px; border-radius: 50%; background: #23324d; }
++.pips u.used { background: var(--cyan); box-shadow: 0 0 5px var(--cyan); }
++.card.locked .front { opacity: .38; border-color: #2a3550; }
++.card.locked .front::after { content: "🔒"; position: absolute; font-size: 15px; top: 2px; inset-inline-end: 3px; }
++.card.dis:not(.flip) { cursor: default; }
++.play.watch .card .front { border-color: rgba(34, 230, 255, .14); }
++
++.foot { display: flex; flex-direction: column; gap: 8px; }
++.watchmsg { text-align: center; font-size: 13px; color: var(--muted); padding: 2px; }
++.answer { padding: 14px; gap: 10px; }
++.answer h3 { margin: 0; font-size: 18px; color: var(--cyan); }
++.typing { text-align: center; padding: 18px 12px; font-size: 18px; color: #c9b4ff; animation: pulse 1.4s ease-in-out infinite; }
++@keyframes pulse { 50% { opacity: .55; } }
++.draft { padding: 10px 12px; border-radius: 10px; background: #060d1b; border: 1px dashed var(--line); font-size: 17px; min-height: 44px; }
++.result { padding: 16px; text-align: center; gap: 8px; }
++.result h3 { margin: 0; font-size: 26px; }
++.result.ok h3 { color: var(--green); text-shadow: 0 0 16px rgba(56, 242, 160, .5); }
++.result.bad h3 { color: var(--red); text-shadow: 0 0 16px rgba(255, 61, 110, .5); }
++.result .time { font-size: 20px; font-weight: 800; direction: rtl; }
++.result .cmp { text-align: right; font-size: 15px; line-height: 1.6; }
++.result .cmp b { color: var(--cyan); }
++
++/* ───── تبويب الفرق ───── */
++.teams { padding: 4px 12px 16px; gap: 12px; flex: none; }
++.team { padding: 12px; gap: 8px; }
++.team.current { border-color: var(--cyan); box-shadow: 0 0 16px rgba(34, 230, 255, .3); }
++.team h3 { margin: 0; font-size: 18px; }
++.members { display: flex; flex-direction: column; gap: 4px; }
++.member { display: flex; align-items: center; gap: 6px; min-height: 36px; font-size: 15px; }
++.tokens { display: flex; flex-wrap: wrap; gap: 6px; }
++.tok { padding: 3px 10px; border-radius: 8px; background: #0a1730; border: 1px solid var(--line); font-size: 15px; }
++.sectitle { font-size: 14px; color: var(--muted); margin: 6px 2px 0; font-weight: 700; }
++table.res { width: 100%; border-collapse: collapse; font-size: 13px; }
++table.res th, table.res td { padding: 8px 4px; text-align: center; border-bottom: 1px solid rgba(34, 230, 255, .12); }
++table.res th { color: var(--muted); font-weight: 600; }
++table.res td:first-child, table.res th:first-child { text-align: right; }
++.wrap-x { overflow-x: auto; }
++input[type=range] { width: 100%; accent-color: var(--cyan); height: 36px; }
++
++#toast { position: fixed; z-index: 100; left: 12px; right: 12px; bottom: calc(env(safe-area-inset-bottom) + 76px); margin: 0 auto; max-width: 420px; padding: 12px 16px; border-radius: 12px; background: #1b0c17; border: 1px solid var(--red); color: #ffd4de; text-align: center; font-size: 15px; opacity: 0; transform: translateY(8px); pointer-events: none; transition: opacity .2s, transform .2s; }
++#toast.show { opacity: 1; transform: none; }
++#toast.info { background: #082030; border-color: var(--cyan); color: var(--text); }
++
++@media (max-height: 700px) { .timer { font-size: 36px; } .btn { min-height: 44px; } }
++@media (prefers-reduced-motion: reduce) { .inner { transition: none; } .timer.crit, .typing { animation: none; } .confetti-piece, .celebrate .star, .celebrate .trophy { animation: none !important; } }
++
++/* ───── بطاقة التهنئة ───── */
++.celebrate {
++  position: fixed; inset: 0; z-index: 90; display: flex; flex-direction: column; align-items: center; justify-content: center;
++  gap: 12px; text-align: center; padding: 24px; overflow: hidden;
++  background:
++    radial-gradient(120% 70% at 50% 15%, rgba(155, 92, 255, .35), transparent 60%),
++    radial-gradient(120% 70% at 50% 100%, rgba(34, 230, 255, .25), transparent 60%),
++    var(--bg);
++}
++.celebrate .layer { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
++.celebrate .star { position: absolute; font-size: 18px; opacity: .85; animation: twinkle 1.6s ease-in-out infinite; }
++@keyframes twinkle { 50% { opacity: .15; transform: scale(.7); } }
++.confetti-piece { position: absolute; top: -24px; width: 8px; height: 14px; border-radius: 2px; animation: confetti-fall linear forwards; }
++@keyframes confetti-fall { to { transform: translateY(112vh) rotate(540deg); opacity: .85; } }
++.celebrate .trophy { font-size: 60px; filter: drop-shadow(0 0 20px rgba(34, 230, 255, .7)); animation: pop .5s ease; }
++@keyframes pop { from { transform: scale(.4); opacity: 0; } to { transform: scale(1); opacity: 1; } }
++.celebrate h1 { margin: 0; font-size: 20px; font-weight: 700; color: var(--text); line-height: 1.5; max-width: 420px; }
++.celebrate .winner { display: block; margin-top: 4px; font-size: 30px; font-weight: 900; color: var(--amber); text-shadow: 0 0 18px rgba(255, 200, 87, .6); }
++.celebrate .members { font-size: 15px; color: var(--cyan); max-width: 420px; }
++.celebrate .by { position: absolute; bottom: calc(env(safe-area-inset-bottom) + 16px); font-size: 12px; letter-spacing: 3px; color: var(--muted); }
+diff --git a/server/engine.js b/server/engine.js
+index d3ed5ab..a9965a9 100644
+--- a/server/engine.js
++++ b/server/engine.js
+@@ -9,7 +9,7 @@ const { tokenize, answerMatches } = require('./arabic');
+ const { generateValidPuzzle, validatePuzzle, SYMBOLS, BOARD_SIZE, MAX_REVEALS, MIN_TOKENS, MAX_TOKENS } = require('./puzzle');
+ 
+ const LIMITS = {
+-  minDuration: 25, maxDuration: 60, defaultDuration: 35, revealMs: 1000,
++  minDuration: 25, maxDuration: 90, defaultDuration: 35, revealMs: 1000,
+   maxTeams: 12, maxPlayers: 150, maxRooms: 500, maxAnswerLen: 300, maxSentenceLen: 200,
+ };
+ 
+@@ -191,8 +191,7 @@ class Engine {
+     const team = this._team(room, teamId);
+     const target = room.players.get(playerId);
+     if (!target || target.teamId !== team.id) fail('bad_player', 'اللاعب ليس عضوًا في هذا الفريق');
+-    if (this._inPlay(team)) fail('busy', 'لا يمكن تغيير القائد أثناء الجولة');
+-    team.leaderId = target.id;
++    team.leaderId = target.id; // ينتقل فورًا حتى أثناء الجولة؛ القائد القديم يفقد الصلاحية فورًا لأن الفحص ديناميكي في _leaderRound
+     this._touch(room);
+   }
+ 
+@@ -215,6 +214,54 @@ class Engine {
+     this._touch(room);
+   }
+ 
++  kickPlayer(room, player, { playerId }) {
++    this._requireHost(room, player);
++    const target = room.players.get(playerId);
++    if (!target) fail('no_player', 'اللاعب غير موجود');
++    if (target.id === room.hostId) fail('bad_player', 'لا يمكن طرد المستضيف');
++    const team = target.teamId ? this._team(room, target.teamId) : null;
++    if (team && team.leaderId === target.id) {
++      const next = [...room.players.values()].find((p) => p.teamId === team.id && p.id !== target.id);
++      team.leaderId = next ? next.id : null;
++    }
++    room.players.delete(target.id);
++    for (const c of target.conns) { try { c.sendJSON({ t: 'kicked' }); c.close(4001); } catch { /* تجاهل */ } }
++    target.conns.clear();
++    this._touch(room);
++  }
++
++  // إعادة كل الفرق إلى حالة ما قبل الجولة: تصفير الجملة/اللغز/عدادات الكشف، مع إبقاء الفرق واللاعبين والقادة كما هم
++  _resetAllRounds(room) {
++    for (const t of room.teams) {
++      if (t.round) this._clearTimers(t.round);
++      t.sentence = ''; t.tokens = null; t.puzzle = null; t.round = null;
++    }
++    room.activeTeamId = null;
++    room.allDone = false;
++  }
++
++  returnToLobby(room, player) {
++    this._requireHost(room, player);
++    if (this._anyInPlay(room)) fail('busy', 'انتظر انتهاء الجولة الحالية أولًا');
++    this._resetAllRounds(room);
++    this._touch(room);
++  }
++
++  replay(room, player) {
++    this._requireHost(room, player);
++    if (!room.allDone) fail('not_finished', 'يجب أن تنتهي جميع الفرق أولًا لإعادة اللعب');
++    this._resetAllRounds(room);
++    this._touch(room);
++  }
++
++  // قاعدة الترتيب الوحيدة: النقاط أولًا (حل صحيح = 1)، ثم وقت الحل لكسر التعادل — لا يُستخدم عدد العمليات/الكشف كمعيار مستقل إطلاقًا
++  _ranking(room) {
++    return room.teams
++      .filter((t) => t.round && t.round.status === 'FINISHED')
++      .map((t) => ({ teamId: t.id, name: t.name, verdict: t.round.result.verdict, score: t.round.result.score, solveMs: t.round.result.solveMs }))
++      .sort((a, b) => (b.score - a.score) || ((a.solveMs ?? Infinity) - (b.solveMs ?? Infinity)));
++  }
++
+   // ───────────────────────── الجملة واللغز ─────────────────────────
+   setSentence(room, player, { teamId, sentence }) {
+     this._requireHost(room, player);
+@@ -300,17 +347,9 @@ class Engine {
+     this._touch(room);
+   }
+ 
+-  reorder(room, player, { order }) {
+-    const { round } = this._leaderRound(room, player);
+-    this._expireIfDue(room, round);
+-    if (round.status !== 'ACTIVE') fail('not_active', 'ترتيب الشفرة متاح أثناء اللعب فقط');
+-    if (!Array.isArray(order) || order.length !== round.code.length) fail('bad_order', 'ترتيب غير صالح');
+-    const a = [...order].sort((x, y) => x - y).join(), b = [...round.code].sort((x, y) => x - y).join();
+-    if (a !== b) fail('bad_order', 'ترتيب غير صالح');
+-    if (order.join() === round.order.join()) return;
+-    round.order = order.map(Number);
+-    round.reorders++;
+-    this._touch(room);
++  reorder(room, player, { order }) { // eslint-disable-line no-unused-vars
++    this._leaderRound(room, player); // تحقق من الهوية فقط (لأجل رسائل خطأ متسقة مثل not_leader/not_active)
++    fail('locked', 'ترتيب صندوق الشفرة ثابت ويطابق ترتيب الجملة الأصلية دائمًا ولا يمكن تغييره');
+   }
+ 
+   finishEarly(room, player) {
+@@ -340,6 +379,7 @@ class Engine {
+     const reveals = round.reveals.length;
+     round.result = {
+       verdict: correct ? 'CORRECT' : 'WRONG',
++      score: correct ? 1 : 0,
+       answer: text,
+       sentence: team.sentence,
+       solveMs: correct ? Math.round(t - round.startMono) : null,
+@@ -363,6 +403,7 @@ class Engine {
+ 
+   snapshot(room, viewer) {
+     const isHost = viewer.role === 'host';
++    const reveal = isHost || room.allDone; // بعد انتهاء جميع الفرق تُكشف النتائج للجميع؛ قبل ذلك للمستضيف فقط
+     const players = [...room.players.values()];
+     const active = this._active(room);
+     const snap = {
+@@ -377,10 +418,11 @@ class Engine {
+         members: players.filter((p) => p.teamId === t.id).map((p) => ({ id: p.id, name: p.name, online: p.conns.size > 0 })),
+         sentence: isHost ? t.sentence : undefined,
+         tokens: isHost ? t.tokens : undefined,
+-        result: t.round && t.round.status === 'FINISHED' ? t.round.result : undefined,
++        result: reveal && t.round && t.round.status === 'FINISHED' ? t.round.result : undefined,
+       })),
+       spectators: players.filter((p) => p.role !== 'host' && !p.teamId).map((p) => ({ id: p.id, name: p.name, online: p.conns.size > 0 })),
+       round: null,
++      ranking: room.allDone ? this._ranking(room) : undefined,
+     };
+     if (active) {
+       const r = active.round;
+@@ -393,7 +435,7 @@ class Engine {
+           endReason: r.endReason,
+         });
+         if (isHost || viewer.teamId === active.id) view.draft = r.draft;
+-        if (r.status === 'FINISHED') view.result = r.result;
++        if (reveal) view.result = r.result;
+       }
+       snap.round = view;
+     }
+diff --git a/server/index.js b/server/index.js
+index d35124c..2ab4f01 100644
+--- a/server/index.js
++++ b/server/index.js
+@@ -32,7 +32,8 @@ function createApp({ engine = new Engine(), allowedOrigins = [] } = {}) {
+   });
+ 
+   const ACTIONS = new Set(['createTeam', 'removeTeam', 'moveTeam', 'selectTeam', 'nextTeam', 'setLeader', 'joinTeam',
+-    'setSentence', 'startRound', 'revealCard', 'reorder', 'finishEarly', 'setDraft', 'submitAnswer']);
++    'setSentence', 'startRound', 'revealCard', 'reorder', 'finishEarly', 'setDraft', 'submitAnswer',
++    'kickPlayer', 'returnToLobby', 'replay']);
+ 
+   const sock = ws.attach(server, {
+     allowedOrigins,
+diff --git a/server/puzzle.js b/server/puzzle.js
+index 7d7142c..2d11760 100644
+--- a/server/puzzle.js
++++ b/server/puzzle.js
+@@ -18,8 +18,6 @@ if (SYMBOLS.length !== BOARD_SIZE || new Set(SYMBOLS).size !== SYMBOLS.length) {
+ const MAX_REVEALS = 2;
+ const DIRECT_RATIO = 0.6;
+ const MIN_TOKENS = 3;
+-const MAX_HOPS = 3;          // أقصى عدد رموز وسيطة في مسار واحد
+-const DECOY_TARGET = 4;      // نحاول إبقاء 4 بطاقات مضللة على الأقل
+ 
+ // أقصى عدد عناصر: n + (n - ceil(0.6n)) ≤ 30 يسمح حتى 22، ونحدّه بـ20 لضمان وجود بطاقات مضللة.
+ const MAX_TOKENS = 20;
+@@ -49,15 +47,7 @@ function generatePuzzle(tokens, rand = Math.random) {
+   const order = shuffle([...Array(n).keys()], rand);
+   const indirectIdx = order.slice(0, indirect);
+   const hops = new Array(n).fill(0);
+-  for (const i of indirectIdx) hops[i] = 1;
+-
+-  // إطالة بعض المسارات إن بقي متسع مع الحفاظ على بطاقات مضللة
+-  let extra = Math.max(0, BOARD_SIZE - n - indirect - DECOY_TARGET);
+-  extra = Math.floor(rand() * (extra + 1));
+-  for (let guard = 0; extra > 0 && indirectIdx.length && guard < 300; guard++) {
+-    const i = indirectIdx[Math.floor(rand() * indirectIdx.length)];
+-    if (hops[i] < MAX_HOPS) { hops[i]++; extra--; }
+-  }
++  for (const i of indirectIdx) hops[i] = 1; // مسار غير مباشر = خطوة PATH واحدة فقط تشير مباشرة إلى TARGET (word)
+ 
+   const pool = shuffle([...Array(BOARD_SIZE).keys()], rand);
+   let p = 0;
+@@ -79,19 +69,21 @@ function generatePuzzle(tokens, rand = Math.random) {
+   const banned = new Set(tokens.map(normalize));
+   const words = shuffle(DECOY_WORDS.filter((w) => !banned.has(normalize(w))), rand);
+   const decoys = pool.slice(p);
++  // نحدد مسبقًا أي بطاقات المضلّلات ستكون PATH (link) قبل التوليد، حتى لا يشير PATH مضلّل إلى PATH آخر أبدًا
++  const isLink = decoys.map(() => rand() < 0.4);
++  if (decoys.length && isLink.every(Boolean)) isLink[0] = false; // نضمن وجود هدف word واحد على الأقل
++  const wordTargets = decoys.filter((d, i) => !isLink[i]);
+   let wi = 0;
+-  for (const d of decoys) {
+-    if (decoys.length > 1 && rand() < 0.4) {
+-      let t;
+-      do { t = decoys[Math.floor(rand() * decoys.length)]; } while (t === d);
++  decoys.forEach((d, i) => {
++    if (isLink[i] && wordTargets.length) {
++      const t = wordTargets[Math.floor(rand() * wordTargets.length)];
+       cards[d] = { kind: 'link', target: t, text: linkText(t), role: 'decoy' };
+     } else {
+       cards[d] = { kind: 'word', text: words[wi++ % words.length], role: 'decoy' };
+     }
+-  }
++  });
+ 
+-  let initialOrder = shuffle([...code], rand);
+-  for (let k = 0; k < 20 && n > 1 && initialOrder.every((v, i) => v === code[i]); k++) shuffle(initialOrder, rand);
++  const initialOrder = [...code]; // ترتيب صندوق الشفرة يطابق ترتيب الجملة الأصلية دائمًا (position ثابت)
+ 
+   return { tokens: [...tokens], code, cards, initialOrder, maxReveals: MAX_REVEALS, revealCounts: new Array(BOARD_SIZE).fill(0) };
+ }
+@@ -109,8 +101,8 @@ function validatePuzzle(pz) {
+   if (code.length !== n) errors.push('عدد رموز الشفرة لا يساوي عدد عناصر الجملة');
+   if (new Set(code).size !== code.length) errors.push('رمز شفرة مكرر');
+   if (code.some((c) => !Number.isInteger(c) || c < 0 || c >= BOARD_SIZE)) errors.push('رمز شفرة خارج اللوحة');
+-  if (initialOrder.length !== n || [...initialOrder].sort((a, b) => a - b).join() !== [...code].sort((a, b) => a - b).join()) {
+-    errors.push('الترتيب الأولي ليس تبديلًا لرموز الشفرة');
++  if (initialOrder.length !== n || initialOrder.some((v, i) => v !== code[i])) {
++    errors.push('ترتيب صندوق الشفرة يجب أن يطابق ترتيب الجملة الأصلية تمامًا (position ثابت لكل عنصر)');
+   }
+   if (pz.maxReveals !== MAX_REVEALS) errors.push('الحد الأقصى للكشف ليس 2');
+   if (!pz.revealCounts || pz.revealCounts.length !== BOARD_SIZE || pz.revealCounts.some((v) => v !== 0)) errors.push('عدّاد الكشف ليس صفرًا');
+@@ -149,12 +141,16 @@ function validatePuzzle(pz) {
+ 
+   if (direct !== directCountFor(n)) errors.push(`نسبة المسارات المباشرة غير صحيحة (${direct}/${n})`);
+ 
+-  // لا تعليمة مضللة تشير إلى بطاقة من الحل، وكل تعليمة تشير لرمز موجود
++  // لا تعليمة مضللة تشير إلى بطاقة من الحل، ولا أي تعليمة (PATH) تشير إلى تعليمة PATH أخرى، وكل تعليمة تشير لرمز موجود
+   cards.forEach((card, idx) => {
+     if (!card) return;
+     if (card.kind === 'link') {
+       if (!Number.isInteger(card.target) || card.target < 0 || card.target >= BOARD_SIZE) errors.push('تعليمة إلى رمز غير موجود');
+-      else if (card.role === 'decoy' && cards[card.target] && cards[card.target].role !== 'decoy') errors.push('بطاقة مضللة تشير إلى بطاقة من الحل');
++      else {
++        const tgt = cards[card.target];
++        if (tgt && tgt.kind === 'link') errors.push(`سلسلة PATH←PATH غير مسموحة عند ${SYMBOLS[idx]}`);
++        if (card.role === 'decoy' && tgt && tgt.role !== 'decoy') errors.push('بطاقة مضللة تشير إلى بطاقة من الحل');
++      }
+     }
+     if (card.role === 'decoy' && card.kind === 'word' && tokens.some((t) => normalize(t) === normalize(card.text))) {
+       errors.push(`بطاقة مضللة تحمل عنصرًا من الجملة (${SYMBOLS[idx]})`);
+diff --git a/test/engine.test.js b/test/engine.test.js
+index c0d961a..9d0f5a2 100644
+--- a/test/engine.test.js
++++ b/test/engine.test.js
+@@ -87,10 +87,10 @@ test('puzzle: المدقق يكتشف الأعطال', () => {
+   const bad6 = structuredClone(pz); bad6.cards[freeCard] = null; // بطاقة ناقصة خارج كل المسارات
+   assert.equal(validatePuzzle(bad6).ok, false);
+ });
+-test('puzzle: الشفرة الأولية ليست مرتبة، ومحتوى الفرق مختلف', () => {
++test('puzzle: الشفرة الأولية تطابق ترتيب الجملة دائمًا (position ثابت)، ومحتوى الفرق مختلف', () => {
+   const tokens = tokenize('العلم نور والعمل أساس النجاح');
+   const a = generateValidPuzzle(tokens), b = generateValidPuzzle(tokens);
+-  assert.notDeepEqual(a.initialOrder, a.code);
++  assert.deepEqual(a.initialOrder, a.code); // لا عشوائية بعد الآن — بند 5
+   assert.notDeepEqual(a.cards.map((c) => c.text), b.cards.map((c) => c.text));
+ });
+ test('puzzle: صندوق الرموز والشفرة — لا تكرار ولا رمز أو حرف من خارج الصندوق', () => {
+@@ -146,13 +146,13 @@ test('غرفة: أول عضو قائد افتراضيًا، والمستضيف 
+   assert.equal(A.leaderId, ma.id);
+ });
+ 
+-test('لا بدء دون جملة/قائد، والمدة 25..60 فقط', () => {
++test('لا بدء دون جملة/قائد، والمدة 25..90 فقط', () => {
+   const { engine, room, host, A, B } = setup();
+   engine.selectTeam(room, host, { teamId: A.id });
+   rejects(() => engine.startRound(room, host, { durationSec: 35 }), 'no_puzzle');
+   rejects(() => engine.setSentence(room, host, { teamId: A.id, sentence: 'كلمتان فقط' }), 'bad_sentence');
+   engine.setSentence(room, host, { teamId: A.id, sentence: SENT });
+-  for (const d of [24, 61, 30.5, '35', null]) rejects(() => engine.startRound(room, host, { durationSec: d }), 'bad_duration');
++  for (const d of [24, 91, 30.5, '35', null]) rejects(() => engine.startRound(room, host, { durationSec: d }), 'bad_duration');
+   engine.selectTeam(room, host, { teamId: B.id });
+   engine.setSentence(room, host, { teamId: B.id, sentence: SENT });
+   engine.setLeader(room, host, { teamId: B.id, playerId: room.teams[1].leaderId });
+@@ -161,6 +161,14 @@ test('لا بدء دون جملة/قائد، والمدة 25..60 فقط', () =>
+   assert.equal(A.round.durationSec, 25);
+ });
+ 
++test('المؤقت يقبل الحد الأعلى الجديد 90 ثانية', () => {
++  const { engine, room, host, A } = setup();
++  engine.selectTeam(room, host, { teamId: A.id });
++  engine.setSentence(room, host, { teamId: A.id, sentence: SENT });
++  engine.startRound(room, host, { durationSec: 90 });
++  assert.equal(A.round.durationSec, 90);
++});
++
+ test('السر لا يُرسل: اللقطة قبل الكشف لا تحتوي المحتوى ولا الجملة لغير المستضيف', () => {
+   const { engine, room, host, A, la, ma, spec } = setup();
+   engine.selectTeam(room, host, { teamId: A.id });
+@@ -216,15 +224,12 @@ test('الصلاحيات: العضو/المشاهد/قائد فريق آخر/ا
+   rejects(() => engine.selectTeam(room, host, { teamId: room.teams[1].id }), 'busy');
+ });
+ 
+-test('ترتيب الشفرة: تبديل صالح فقط ويُزامن', () => {
+-  const { engine, room, la, A, inbox } = startedA();
+-  const order = [...A.puzzle.code];
+-  engine.reorder(room, la, { order });
+-  assert.deepEqual(engine.snapshot(room, la).round.order, order);
+-  rejects(() => engine.reorder(room, la, { order: order.slice(1) }), 'bad_order');
+-  rejects(() => engine.reorder(room, la, { order: [...order.slice(1), 29 === order[0] ? 28 : 29] }), 'bad_order');
+-  const last = inbox.get(room.players.keys().next().value); // المستضيف
+-  assert.ok(last.msgs.length > 0);
++test('ترتيب صندوق الشفرة ثابت دائمًا: يطابق ترتيب الجملة الأصلية ولا يمكن للقائد تغييره', () => {
++  const { engine, room, la, A } = startedA();
++  assert.deepEqual(A.round.order, A.puzzle.code); // مطابق لترتيب الجملة من البداية، لا عشوائية
++  rejects(() => engine.reorder(room, la, { order: A.puzzle.code }), 'locked'); // حتى ترتيب صالح تمامًا يُرفض
++  rejects(() => engine.reorder(room, la, { order: [...A.puzzle.code].reverse() }), 'locked');
++  assert.deepEqual(A.round.order, A.puzzle.code); // لم يتغيّر
+ });
+ 
+ test('المؤقت: ACTIVE→ANSWERING تلقائيًا وتتوقف كل التفاعلات', () => {
+@@ -235,7 +240,7 @@ test('المؤقت: ACTIVE→ANSWERING تلقائيًا وتتوقف كل الت
+   assert.equal(A.round.status, 'ANSWERING');
+   assert.equal(A.round.endReason, 'timeout');
+   rejects(() => engine.revealCard(room, la, { card: 0 }), 'not_active');
+-  rejects(() => engine.reorder(room, la, { order: A.puzzle.code }), 'not_active');
++  rejects(() => engine.reorder(room, la, { order: A.puzzle.code }), 'locked');
+   rejects(() => engine.finishEarly(room, la), 'not_active');
+ });
+ 
+@@ -253,7 +258,6 @@ test('إجابة صحيحة بعد انتهاء الوقت: CORRECT→FINISHED 
+   const { env, engine, room, la, ma, A } = startedA({ d: 25 });
+   engine.revealCard(room, la, { card: 4 }); env.advance(1100);
+   engine.revealCard(room, la, { card: 4 }); env.advance(1100);
+-  engine.reorder(room, la, { order: A.puzzle.code });
+   env.advance(30_000);
+   assert.equal(A.round.status, 'ANSWERING');
+   rejects(() => engine.submitAnswer(room, ma, { text: SENT }), 'not_leader');
+@@ -271,6 +275,28 @@ test('إجابة صحيحة بعد انتهاء الوقت: CORRECT→FINISHED 
+   rejects(() => engine.submitAnswer(room, la, { text: SENT }), 'not_answering'); // لا محاولة ثانية
+ });
+ 
++test('إخفاء verdict: المستضيف فقط يراه، الفريق المجيب والفرق الأخرى لا يريانه', () => {
++  const { engine, room, host, la, ma, lb, spec, A } = startedA({ d: 25 });
++  engine.finishEarly(room, la);
++  engine.submitAnswer(room, la, { text: SENT }); // إجابة صحيحة
++  assert.equal(A.round.status, 'FINISHED');
++  assert.equal(A.round.result.verdict, 'CORRECT'); // الحقيقة الداخلية صحيحة كما هي
++
++  const hostSnap = engine.snapshot(room, host);
++  assert.equal(hostSnap.round.result.verdict, 'CORRECT');
++  assert.equal(hostSnap.teams.find((t) => t.id === A.id).result.verdict, 'CORRECT');
++
++  for (const viewer of [la, ma, lb, spec]) {
++    const s = engine.snapshot(room, viewer);
++    assert.equal(s.round.result, undefined, `يجب ألا يرى ${viewer.name} نتيجة الجولة`);
++    assert.equal(s.teams.find((t) => t.id === A.id).result, undefined, `يجب ألا يرى ${viewer.name} نتيجة الفريق في قائمة الفرق`);
++    assert.ok(!JSON.stringify(s).includes('CORRECT'), `تسرّب verdict إلى ${viewer.name}`);
++  }
++  // الفريق المجيب يبقى يرى مسودّته (إجابته) رغم إخفاء verdict عنه
++  assert.equal(engine.snapshot(room, la).round.draft, SENT);
++  assert.equal(engine.snapshot(room, la).round.status, 'FINISHED');
++});
++
+ test('إنهاء مبكر + إجابة صحيحة: زمن دقيق، والجولة تنتهي فورًا', () => {
+   const { env, engine, room, la, A } = startedA();
+   env.advance(21_840);
+@@ -339,17 +365,119 @@ test('لا تغيير للجملة أو للفريق أثناء الجولة', (
+   const { engine, room, host, A, ma } = startedA();
+   rejects(() => engine.setSentence(room, host, { teamId: A.id, sentence: 'الصبر مفتاح الفرج' }), 'locked');
+   rejects(() => engine.joinTeam(room, ma, { teamId: null }), 'busy');
+-  rejects(() => engine.setLeader(room, host, { teamId: A.id, playerId: ma.id }), 'busy');
+ });
+ 
+-test('ترتيب الشفرة: تكرار رمز أو رمز من خارج الصندوق مرفوض', () => {
+-  const { engine, room, la, A } = startedA();
+-  const code = A.round.code;
+-  const reversed = [...code].reverse();
+-  engine.reorder(room, la, { order: reversed });
+-  assert.deepEqual(A.round.order, reversed);
+-  rejects(() => engine.reorder(room, la, { order: [code[0], ...code.slice(1, -1), code[0]] }), 'bad_order'); // تكرار
+-  rejects(() => engine.reorder(room, la, { order: code.slice(0, -1) }), 'bad_order');                          // ناقص
+-  rejects(() => engine.reorder(room, la, { order: [...code.slice(0, -1), 99] }), 'bad_order');                // خارج الصندوق
+-  assert.deepEqual(A.round.order, reversed); // الرفض لا يغيّر الترتيب
++test('نقل القيادة أثناء ANSWERING ينقل صلاحية الكتابة والإرسال فورًا', () => {
++  const { engine, room, host, la, ma, A } = startedA();
++  engine.finishEarly(room, la);
++  assert.equal(A.round.status, 'ANSWERING');
++  engine.setDraft(room, la, { text: 'مسودة القائد القديم' });
++  engine.setLeader(room, host, { teamId: A.id, playerId: ma.id }); // نقل أثناء ANSWERING
++  assert.equal(A.leaderId, ma.id);
++  rejects(() => engine.setDraft(room, la, { text: 'يجب أن يُرفض' }), 'not_leader');
++  engine.setDraft(room, ma, { text: 'مسودة القائد الجديد' }); // يعمل فورًا
++  assert.equal(A.round.draft, 'مسودة القائد الجديد');
++  rejects(() => engine.submitAnswer(room, la, { text: SENT }), 'not_leader');
++  engine.submitAnswer(room, ma, { text: SENT }); // القائد الجديد يستطيع الإرسال
++  assert.equal(A.round.status, 'FINISHED');
++});
++
++test('طرد لاعب: المستضيف فقط، ينقل القيادة تلقائيًا، ويُمنع من العمل بعدها', () => {
++  const { engine, room, host, ma, la, A } = setup();
++  rejects(() => engine.kickPlayer(room, ma, { playerId: la.id }), 'not_host');
++  rejects(() => engine.kickPlayer(room, host, { playerId: host.id }), 'bad_player'); // لا يطرد نفسه
++  assert.equal(A.leaderId, la.id);
++  engine.kickPlayer(room, host, { playerId: la.id }); // طرد القائد
++  assert.equal(room.players.has(la.id), false);
++  assert.equal(A.leaderId, ma.id); // القيادة انتقلت تلقائيًا لعضو الفريق الباقي
++});
++
++test('العودة إلى الردهة: المستضيف فقط، يصفّر الجولات ويُبقي الفرق والقادة', () => {
++  const { engine, room, host, ma, A, B } = startedA();
++  rejects(() => engine.returnToLobby(room, ma), 'not_host');
++  rejects(() => engine.returnToLobby(room, host), 'busy'); // جولة نشطة الآن
++  engine.finishEarly(room, room.players.get(A.leaderId));
++  engine.submitAnswer(room, room.players.get(A.leaderId), { text: SENT });
++  engine.returnToLobby(room, host);
++  assert.equal(A.round, null);
++  assert.equal(A.sentence, '');
++  assert.equal(A.puzzle, null);
++  assert.equal(B.round, null);
++  assert.equal(room.activeTeamId, null);
++  assert.equal(room.allDone, false);
++  assert.ok(room.teams.includes(A) && room.teams.includes(B)); // الفرق باقية بنفس الهوية
++});
++
++function fullGame(env, engine, room, host, A, B, la, lb) {
++  engine.selectTeam(room, host, { teamId: A.id });
++  engine.setSentence(room, host, { teamId: A.id, sentence: SENT });
++  engine.startRound(room, host, { durationSec: 35 });
++  env.advance(5000);
++  engine.finishEarly(room, la);
++  engine.submitAnswer(room, la, { text: SENT }); // A: صحيحة عند 5000ms
++
++  engine.selectTeam(room, host, { teamId: B.id });
++  engine.setSentence(room, host, { teamId: B.id, sentence: SENT });
++  engine.startRound(room, host, { durationSec: 35 });
++  env.advance(2000);
++  engine.finishEarly(room, lb);
++  engine.submitAnswer(room, lb, { text: SENT }); // B: صحيحة عند 2000ms (أسرع من A)
++
++  engine.nextTeam(room, host); // كلا الفريقين انتهيا → allDone = true
++}
++
++test('الترتيب والنقاط: 1 نقطة للحل الصحيح، كسر التعادل بوقت الحل، والنتائج تُكشف للجميع فقط بعد allDone', () => {
++  const { env, engine, room, host, A, B, la, ma, lb, spec } = setup();
++
++  // قبل الانتهاء: لا أحد غير المستضيف يرى النتائج، ولا يوجد ranking
++  engine.selectTeam(room, host, { teamId: A.id });
++  engine.setSentence(room, host, { teamId: A.id, sentence: SENT });
++  engine.startRound(room, host, { durationSec: 35 });
++  engine.finishEarly(room, la);
++  engine.submitAnswer(room, la, { text: SENT });
++  assert.equal(engine.snapshot(room, ma).ranking, undefined);
++  assert.equal(engine.snapshot(room, ma).teams.find((t) => t.id === A.id).result, undefined);
++
++  engine.selectTeam(room, host, { teamId: B.id });
++  engine.setSentence(room, host, { teamId: B.id, sentence: SENT });
++  engine.startRound(room, host, { durationSec: 35 });
++  engine.finishEarly(room, lb);
++  engine.submitAnswer(room, lb, { text: SENT });
++  assert.equal(room.allDone, false);
++  engine.nextTeam(room, host);
++  assert.equal(room.allDone, true);
++
++  // بعد الانتهاء: الجميع يرون النتائج والترتيب
++  for (const viewer of [ma, spec, lb]) {
++    const s = engine.snapshot(room, viewer);
++    assert.ok(Array.isArray(s.ranking));
++    assert.equal(s.teams.find((t) => t.id === A.id).result.verdict, 'CORRECT');
++  }
++});
++
++test('الترتيب: كسر التعادل بوقت الحل عند تساوي النقاط', () => {
++  const { env, engine, room, host, A, B, la, lb, spec } = setup();
++  fullGame(env, engine, room, host, A, B, la, lb);
++  const rk = engine.snapshot(room, spec).ranking;
++  assert.equal(rk.length, 2);
++  assert.equal(rk[0].teamId, B.id); // أسرع في الحل (2000ms) رغم تساوي النقاط (1 لكل منهما)
++  assert.equal(rk[0].score, 1);
++  assert.equal(rk[1].teamId, A.id);
++  assert.equal(rk[1].solveMs, 5000);
++});
++
++test('إعادة اللعب: تتطلب المستضيف وانتهاء جميع الفرق، تُبقي الفرق/اللاعبين/القادة، وتصفّر بيانات الجولة', () => {
++  const { env, engine, room, host, ma, A, B, la, lb } = setup();
++  rejects(() => engine.replay(room, host), 'not_finished'); // لم تنتهِ الفرق بعد
++  fullGame(env, engine, room, host, A, B, la, lb);
++  rejects(() => engine.replay(room, ma), 'not_host');
++  engine.replay(room, host);
++  assert.equal(A.round, null); assert.equal(A.sentence, ''); assert.equal(A.puzzle, null);
++  assert.equal(B.round, null);
++  assert.equal(room.allDone, false);
++  assert.equal(room.activeTeamId, null);
++  assert.equal(A.leaderId, la.id); // القيادة محفوظة
++  assert.equal(B.leaderId, lb.id);
++  assert.ok(room.teams.includes(A) && room.teams.includes(B)); // نفس الفرق، لا غرفة/جلسة جديدة
++  assert.equal(room.code, room.code); // نفس الغرفة (لا تغيير للكود)
+ });
+diff --git a/test/integration.test.js b/test/integration.test.js
+index dd1aac8..78636af 100644
+--- a/test/integration.test.js
++++ b/test/integration.test.js
+@@ -71,10 +71,11 @@ test('multiplayer: مستضيف + قادة + أعضاء + مشاهد عبر WebS
+     assert.equal(l1.errs.at(-1).code, 'busy');
+     await m1.until((s) => !s.round.active, 2000);
+ 
+-    // ترتيب الشفرة يظهر للجميع لحظيًا
+-    const order = [...l1.state.round.order].reverse();
+-    await l1.send({ t: 'reorder', order });
+-    for (const c of [m1, spec, host]) await c.until((s) => s.round.order.join() === order.join());
++    // ترتيب صندوق الشفرة ثابت الآن (البند 5): محاولة القائد إعادة الترتيب تُرفض دائمًا ولا يتغير الترتيب
++    const fixedOrder = [...l1.state.round.order];
++    await l1.send({ t: 'reorder', order: [...fixedOrder].reverse() });
++    assert.equal(l1.errs.at(-1).code, 'locked');
++    for (const c of [m1, spec, host]) assert.equal(c.state.round.order.join(), fixedOrder.join());
+ 
+     // انقطاع اتصال العضو ثم عودته بنفس الحالة
+     const { code: c0, playerId, secret } = m1.session;
+@@ -95,10 +96,12 @@ test('multiplayer: مستضيف + قادة + أعضاء + مشاهد عبر WebS
+     await m1b.send({ t: 'submitAnswer', text: S1 });
+     assert.equal(m1b.errs.at(-1).code, 'not_leader');
+     await l1.send({ t: 'submitAnswer', text: 'العلم نور والعمل أساس النجاح' });
+-    for (const c of [host, m1b, spec, l2]) {
++    const sHost = await host.until((x) => x.round.status === 'FINISHED');
++    assert.equal(sHost.round.result.verdict, 'CORRECT');
++    assert.ok(sHost.round.result.solveMs > 0);
++    for (const c of [m1b, spec, l2]) {
+       const s = await c.until((x) => x.round.status === 'FINISHED');
+-      assert.equal(s.round.result.verdict, 'CORRECT');
+-      assert.ok(s.round.result.solveMs > 0);
++      assert.equal(s.round.result, undefined); // إخفاء verdict عن الفريق المجيب والفرق الأخرى
+     }
+ 
+     // الفريق التالي

@@ -1,0 +1,167 @@
+diff --git a/public/app.js b/public/app.js
+index bb21d97..7db57b5 100644
+--- a/public/app.js
++++ b/public/app.js
+@@ -254,7 +254,7 @@ function buildPlay() {
+     pending = true;
+     send({ t: 'revealCard', card: i });
+   });
+-  initSort();
++  // initSort() لم تعد تُستدعى: ترتيب صندوق الشفرة ثابت الآن (بند 5) ولا يمكن سحبه/إعادة ترتيبه
+ }
+ 
+ function amLeader() { const rd = S.round; if (!rd) return false; const t = teamById(rd.teamId); return !!t && t.leaderId === S.you.id && S.you.teamId === rd.teamId; }
+@@ -351,7 +351,7 @@ function renderChips(order, n, control) {
+   if (dragging) return;
+   const cur = [...R.chips.children].map((c) => +c.dataset.i);
+   if (cur.join() !== order.join()) R.chips.replaceChildren(...order.map((i) => h('div', { class: 'chip', 'data-i': i, text: S.symbols[i] })));
+-  R.chips.classList.toggle('can', control);
++  R.chips.classList.toggle('can', false); // ترتيب صندوق الشفرة ثابت الآن (بند 5) — لا سحب متاح إطلاقًا
+   R.chips.classList.toggle('sm', n > 12);
+ }
+ 
+diff --git a/server/engine.js b/server/engine.js
+index 5962ce9..a9965a9 100644
+--- a/server/engine.js
++++ b/server/engine.js
+@@ -347,17 +347,9 @@ class Engine {
+     this._touch(room);
+   }
+ 
+-  reorder(room, player, { order }) {
+-    const { round } = this._leaderRound(room, player);
+-    this._expireIfDue(room, round);
+-    if (round.status !== 'ACTIVE') fail('not_active', 'ترتيب الشفرة متاح أثناء اللعب فقط');
+-    if (!Array.isArray(order) || order.length !== round.code.length) fail('bad_order', 'ترتيب غير صالح');
+-    const a = [...order].sort((x, y) => x - y).join(), b = [...round.code].sort((x, y) => x - y).join();
+-    if (a !== b) fail('bad_order', 'ترتيب غير صالح');
+-    if (order.join() === round.order.join()) return;
+-    round.order = order.map(Number);
+-    round.reorders++;
+-    this._touch(room);
++  reorder(room, player, { order }) { // eslint-disable-line no-unused-vars
++    this._leaderRound(room, player); // تحقق من الهوية فقط (لأجل رسائل خطأ متسقة مثل not_leader/not_active)
++    fail('locked', 'ترتيب صندوق الشفرة ثابت ويطابق ترتيب الجملة الأصلية دائمًا ولا يمكن تغييره');
+   }
+ 
+   finishEarly(room, player) {
+diff --git a/server/puzzle.js b/server/puzzle.js
+index 819ace6..2d11760 100644
+--- a/server/puzzle.js
++++ b/server/puzzle.js
+@@ -83,8 +83,7 @@ function generatePuzzle(tokens, rand = Math.random) {
+     }
+   });
+ 
+-  let initialOrder = shuffle([...code], rand);
+-  for (let k = 0; k < 20 && n > 1 && initialOrder.every((v, i) => v === code[i]); k++) shuffle(initialOrder, rand);
++  const initialOrder = [...code]; // ترتيب صندوق الشفرة يطابق ترتيب الجملة الأصلية دائمًا (position ثابت)
+ 
+   return { tokens: [...tokens], code, cards, initialOrder, maxReveals: MAX_REVEALS, revealCounts: new Array(BOARD_SIZE).fill(0) };
+ }
+@@ -102,8 +101,8 @@ function validatePuzzle(pz) {
+   if (code.length !== n) errors.push('عدد رموز الشفرة لا يساوي عدد عناصر الجملة');
+   if (new Set(code).size !== code.length) errors.push('رمز شفرة مكرر');
+   if (code.some((c) => !Number.isInteger(c) || c < 0 || c >= BOARD_SIZE)) errors.push('رمز شفرة خارج اللوحة');
+-  if (initialOrder.length !== n || [...initialOrder].sort((a, b) => a - b).join() !== [...code].sort((a, b) => a - b).join()) {
+-    errors.push('الترتيب الأولي ليس تبديلًا لرموز الشفرة');
++  if (initialOrder.length !== n || initialOrder.some((v, i) => v !== code[i])) {
++    errors.push('ترتيب صندوق الشفرة يجب أن يطابق ترتيب الجملة الأصلية تمامًا (position ثابت لكل عنصر)');
+   }
+   if (pz.maxReveals !== MAX_REVEALS) errors.push('الحد الأقصى للكشف ليس 2');
+   if (!pz.revealCounts || pz.revealCounts.length !== BOARD_SIZE || pz.revealCounts.some((v) => v !== 0)) errors.push('عدّاد الكشف ليس صفرًا');
+diff --git a/test/engine.test.js b/test/engine.test.js
+index 47cd6f9..9d0f5a2 100644
+--- a/test/engine.test.js
++++ b/test/engine.test.js
+@@ -87,10 +87,10 @@ test('puzzle: المدقق يكتشف الأعطال', () => {
+   const bad6 = structuredClone(pz); bad6.cards[freeCard] = null; // بطاقة ناقصة خارج كل المسارات
+   assert.equal(validatePuzzle(bad6).ok, false);
+ });
+-test('puzzle: الشفرة الأولية ليست مرتبة، ومحتوى الفرق مختلف', () => {
++test('puzzle: الشفرة الأولية تطابق ترتيب الجملة دائمًا (position ثابت)، ومحتوى الفرق مختلف', () => {
+   const tokens = tokenize('العلم نور والعمل أساس النجاح');
+   const a = generateValidPuzzle(tokens), b = generateValidPuzzle(tokens);
+-  assert.notDeepEqual(a.initialOrder, a.code);
++  assert.deepEqual(a.initialOrder, a.code); // لا عشوائية بعد الآن — بند 5
+   assert.notDeepEqual(a.cards.map((c) => c.text), b.cards.map((c) => c.text));
+ });
+ test('puzzle: صندوق الرموز والشفرة — لا تكرار ولا رمز أو حرف من خارج الصندوق', () => {
+@@ -224,15 +224,12 @@ test('الصلاحيات: العضو/المشاهد/قائد فريق آخر/ا
+   rejects(() => engine.selectTeam(room, host, { teamId: room.teams[1].id }), 'busy');
+ });
+ 
+-test('ترتيب الشفرة: تبديل صالح فقط ويُزامن', () => {
+-  const { engine, room, la, A, inbox } = startedA();
+-  const order = [...A.puzzle.code];
+-  engine.reorder(room, la, { order });
+-  assert.deepEqual(engine.snapshot(room, la).round.order, order);
+-  rejects(() => engine.reorder(room, la, { order: order.slice(1) }), 'bad_order');
+-  rejects(() => engine.reorder(room, la, { order: [...order.slice(1), 29 === order[0] ? 28 : 29] }), 'bad_order');
+-  const last = inbox.get(room.players.keys().next().value); // المستضيف
+-  assert.ok(last.msgs.length > 0);
++test('ترتيب صندوق الشفرة ثابت دائمًا: يطابق ترتيب الجملة الأصلية ولا يمكن للقائد تغييره', () => {
++  const { engine, room, la, A } = startedA();
++  assert.deepEqual(A.round.order, A.puzzle.code); // مطابق لترتيب الجملة من البداية، لا عشوائية
++  rejects(() => engine.reorder(room, la, { order: A.puzzle.code }), 'locked'); // حتى ترتيب صالح تمامًا يُرفض
++  rejects(() => engine.reorder(room, la, { order: [...A.puzzle.code].reverse() }), 'locked');
++  assert.deepEqual(A.round.order, A.puzzle.code); // لم يتغيّر
+ });
+ 
+ test('المؤقت: ACTIVE→ANSWERING تلقائيًا وتتوقف كل التفاعلات', () => {
+@@ -243,7 +240,7 @@ test('المؤقت: ACTIVE→ANSWERING تلقائيًا وتتوقف كل الت
+   assert.equal(A.round.status, 'ANSWERING');
+   assert.equal(A.round.endReason, 'timeout');
+   rejects(() => engine.revealCard(room, la, { card: 0 }), 'not_active');
+-  rejects(() => engine.reorder(room, la, { order: A.puzzle.code }), 'not_active');
++  rejects(() => engine.reorder(room, la, { order: A.puzzle.code }), 'locked');
+   rejects(() => engine.finishEarly(room, la), 'not_active');
+ });
+ 
+@@ -261,7 +258,6 @@ test('إجابة صحيحة بعد انتهاء الوقت: CORRECT→FINISHED 
+   const { env, engine, room, la, ma, A } = startedA({ d: 25 });
+   engine.revealCard(room, la, { card: 4 }); env.advance(1100);
+   engine.revealCard(room, la, { card: 4 }); env.advance(1100);
+-  engine.reorder(room, la, { order: A.puzzle.code });
+   env.advance(30_000);
+   assert.equal(A.round.status, 'ANSWERING');
+   rejects(() => engine.submitAnswer(room, ma, { text: SENT }), 'not_leader');
+@@ -371,18 +367,6 @@ test('لا تغيير للجملة أو للفريق أثناء الجولة', (
+   rejects(() => engine.joinTeam(room, ma, { teamId: null }), 'busy');
+ });
+ 
+-test('ترتيب الشفرة: تكرار رمز أو رمز من خارج الصندوق مرفوض', () => {
+-  const { engine, room, la, A } = startedA();
+-  const code = A.round.code;
+-  const reversed = [...code].reverse();
+-  engine.reorder(room, la, { order: reversed });
+-  assert.deepEqual(A.round.order, reversed);
+-  rejects(() => engine.reorder(room, la, { order: [code[0], ...code.slice(1, -1), code[0]] }), 'bad_order'); // تكرار
+-  rejects(() => engine.reorder(room, la, { order: code.slice(0, -1) }), 'bad_order');                          // ناقص
+-  rejects(() => engine.reorder(room, la, { order: [...code.slice(0, -1), 99] }), 'bad_order');                // خارج الصندوق
+-  assert.deepEqual(A.round.order, reversed); // الرفض لا يغيّر الترتيب
+-});
+-
+ test('نقل القيادة أثناء ANSWERING ينقل صلاحية الكتابة والإرسال فورًا', () => {
+   const { engine, room, host, la, ma, A } = startedA();
+   engine.finishEarly(room, la);
+diff --git a/test/integration.test.js b/test/integration.test.js
+index 4b903d4..78636af 100644
+--- a/test/integration.test.js
++++ b/test/integration.test.js
+@@ -71,10 +71,11 @@ test('multiplayer: مستضيف + قادة + أعضاء + مشاهد عبر WebS
+     assert.equal(l1.errs.at(-1).code, 'busy');
+     await m1.until((s) => !s.round.active, 2000);
+ 
+-    // ترتيب الشفرة يظهر للجميع لحظيًا
+-    const order = [...l1.state.round.order].reverse();
+-    await l1.send({ t: 'reorder', order });
+-    for (const c of [m1, spec, host]) await c.until((s) => s.round.order.join() === order.join());
++    // ترتيب صندوق الشفرة ثابت الآن (البند 5): محاولة القائد إعادة الترتيب تُرفض دائمًا ولا يتغير الترتيب
++    const fixedOrder = [...l1.state.round.order];
++    await l1.send({ t: 'reorder', order: [...fixedOrder].reverse() });
++    assert.equal(l1.errs.at(-1).code, 'locked');
++    for (const c of [m1, spec, host]) assert.equal(c.state.round.order.join(), fixedOrder.join());
+ 
+     // انقطاع اتصال العضو ثم عودته بنفس الحالة
+     const { code: c0, playerId, secret } = m1.session;
